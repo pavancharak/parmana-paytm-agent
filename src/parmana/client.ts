@@ -16,11 +16,35 @@ export interface BusinessTransaction {
   createdAt: string;
 }
 
-export interface ParmanaExecutionResult {
-  transaction: BusinessTransaction;
-  context: Record<string, unknown>;
-  trustRecord: Record<string, unknown>;
-}
+/**
+ * The real, verified /execute response shape (confirmed against the
+ * live deployment, https://parmana-api-real.vercel.app -- NOT the
+ * earlier {transaction, context, trustRecord} envelope this file used
+ * to expect, which no real Parmana deployment has ever returned).
+ *
+ * APPROVED: HTTP 200, the full signed Execution Trust Record --
+ * {trustRecordId, businessTransactionId, transaction, executions,
+ * overrides, verifications, receipts, trustRecordHash, signature,
+ * authorization: {payload: {authorizationId, ...}}, createdAt,
+ * updatedAt}. `trustRecord` here is exactly that raw response body.
+ *
+ * DENIED: HTTP 403, {error, code: "POLICY_DENIED"} -- not an
+ * exception; a normal, expected outcome this client returns as data,
+ * mirroring exactly how ExecutionGate.enforce (the real Parmana
+ * source) distinguishes a policy rejection from a genuine failure.
+ */
+export type ParmanaExecutionResult =
+  | {
+      readonly outcome: "APPROVED";
+      readonly businessTransactionId: string;
+      readonly authorizationId: string;
+      readonly trustRecord: Record<string, unknown>;
+    }
+  | {
+      readonly outcome: "DENIED";
+      readonly businessTransactionId: string;
+      readonly reason: string;
+    };
 
 export class ParmanaExecutionAmbiguousError extends Error {
   readonly status: number;
@@ -51,18 +75,31 @@ export class ParmanaHttpClient {
   async execute(transaction: BusinessTransaction): Promise<ParmanaExecutionResult> {
     const response = await this.request("/execute", { method: "POST", body: transaction });
 
-    if (!response.ok) {
-      if (response.status === 409 || response.status >= 500) {
-        throw new ParmanaExecutionAmbiguousError(
-          response.status,
-          transaction.businessTransactionId,
-          response.body,
-        );
-      }
-      throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(response.body)}`);
+    if (response.ok) {
+      return parseApprovedResult(response.status, response.body, transaction.businessTransactionId);
     }
 
-    return parseExecutionResult(response.status, response.body);
+    // A clean policy denial is a definite, non-ambiguous outcome --
+    // never thrown as an error. ExecutionGate.enforce (the real
+    // Parmana source) always returns exactly this {error, code:
+    // "POLICY_DENIED"} shape at HTTP 403 for a REJECT decision.
+    if (response.status === 403 && isRecord(response.body) && response.body["code"] === "POLICY_DENIED") {
+      return {
+        outcome: "DENIED",
+        businessTransactionId: transaction.businessTransactionId,
+        reason: typeof response.body["error"] === "string" ? response.body["error"] : "Parmana policy rejected the refund",
+      };
+    }
+
+    if (response.status === 409 || response.status >= 500) {
+      throw new ParmanaExecutionAmbiguousError(
+        response.status,
+        transaction.businessTransactionId,
+        response.body,
+      );
+    }
+
+    throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(response.body)}`);
   }
 
   /**
@@ -116,12 +153,49 @@ export class ParmanaHttpClient {
   }
 }
 
-function parseExecutionResult(status: number, value: unknown): ParmanaExecutionResult {
+/**
+ * Extracts the granted authorizationId from a real Execution Trust
+ * Record: the signed top-level `authorization.payload.authorizationId`
+ * (the actual authorization Parmana issued), falling back to the last
+ * execution's `metadata.authorizationId` (also present on the real
+ * response, and equal to the same value) if the primary field is
+ * somehow absent.
+ */
+export function parseApprovedResult(status: number, value: unknown, expectedTransactionId: string): ParmanaExecutionResult {
   if (!isRecord(value)) throw new Error(`Parmana returned an invalid execution response (HTTP ${status})`);
-  if (!isRecord(value["transaction"]) || !isRecord(value["context"]) || !isRecord(value["trustRecord"])) {
-    throw new Error("Parmana returned an incomplete execution response");
+
+  const transaction = value["transaction"];
+  if (!isRecord(transaction) || transaction["businessTransactionId"] !== expectedTransactionId) {
+    throw new Error("Parmana returned an execution response for a different business transaction");
   }
-  return value as unknown as ParmanaExecutionResult;
+
+  const executions = Array.isArray(value["executions"]) ? value["executions"].filter(isRecord) : [];
+  const lastExecution = executions.at(-1);
+  const decision = lastExecution && isRecord(lastExecution["decision"]) ? lastExecution["decision"] : undefined;
+  const outcome = decision ? String(decision["outcome"] ?? "") : "";
+
+  if (outcome !== "APPROVED") {
+    throw new Error(`Parmana returned HTTP ${status} with no APPROVED execution decision -- malformed response`);
+  }
+
+  const authorizationEnvelope = value["authorization"];
+  const payload = isRecord(authorizationEnvelope) ? authorizationEnvelope["payload"] : undefined;
+  const executionMetadata = lastExecution && isRecord(lastExecution["metadata"]) ? lastExecution["metadata"] : undefined;
+
+  const authorizationId =
+    (isRecord(payload) && typeof payload["authorizationId"] === "string" ? payload["authorizationId"] : undefined) ??
+    (executionMetadata && typeof executionMetadata["authorizationId"] === "string" ? executionMetadata["authorizationId"] : undefined);
+
+  if (!authorizationId) {
+    throw new Error("Parmana APPROVED response did not contain an authorizationId");
+  }
+
+  return {
+    outcome: "APPROVED",
+    businessTransactionId: expectedTransactionId,
+    authorizationId,
+    trustRecord: value,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

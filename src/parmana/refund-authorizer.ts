@@ -31,7 +31,17 @@ export class ParmanaRefundAuthorizer {
   constructor(
     private readonly client: ParmanaHttpClient,
     private readonly principalId: string,
-    private readonly action = "paytm-refund",
+    // The real, deployed Parmana capability id (namespaced,
+    // "paytm:refund") -- NOT the hyphenated "paytm-refund" wire
+    // action the connector service's own POST /connector/paytm-refund
+    // body uses (see server/handler.ts's own check). Those are two
+    // unrelated contracts: this one is intent.action sent to
+    // Parmana's /execute; that one is the connector-service envelope
+    // GatewayPaytmAdapter (Parmana's own execution gateway) builds
+    // after Parmana has already decided. Confirmed against the real
+    // deployment: only "paytm:refund" has a canonical capability/
+    // policy binding and a registered connector.
+    private readonly action = "paytm:refund",
   ) {
     if (!principalId.trim()) throw new Error("Parmana principalId is required");
   }
@@ -69,11 +79,21 @@ export class ParmanaRefundAuthorizer {
         authorizationId,
         action: this.action,
         target: input.orderId,
+        // The real, deployed paytm:refund capability's deny-by-default
+        // parameter allowlist is exactly {orderId, transactionId,
+        // amount, refundReason} (packages/connector-paytm's
+        // PAYTM_ALLOWED_REFUND_PARAMETERS in the Parmana repo) --
+        // NOT txnId or refId. GatewayPaytmAdapter (Parmana's own
+        // execution gateway) derives refId itself, deterministically,
+        // from (orderId, transactionId) -- sending our own here would
+        // be silently ignored at best and refused outright at worst
+        // (confirmed: refused, HTTP 500 "unsupported refund
+        // parameters" against the real deployment). Parmana's
+        // `transactionId` is this integration's own `txnId`.
         parameters: {
           amount: Number(amount),
           orderId: input.orderId,
-          txnId: input.txnId,
-          refId,
+          transactionId: input.txnId,
         },
         createdAt: issuedAt,
       },
@@ -110,8 +130,11 @@ export class ParmanaRefundAuthorizer {
     amount: string,
   ): RefundAuthorization {
     return {
-      decision: extractDecision(raw),
-      transactionId: raw.transaction.businessTransactionId,
+      decision:
+        raw.outcome === "APPROVED"
+          ? { decision: "APPROVED", authorizationId: raw.authorizationId }
+          : { decision: "DENIED", authorizationId: "", reason: raw.reason },
+      transactionId: raw.businessTransactionId,
       orderId,
       txnId,
       amount,
@@ -120,7 +143,20 @@ export class ParmanaRefundAuthorizer {
   }
 }
 
+/**
+ * Recovery path for an ambiguous execute() outcome (HTTP 409/5xx):
+ * re-derives the same ParmanaExecutionResult shape execute() itself
+ * returns from the durably persisted Trust Record, so callers never
+ * need a second code path to interpret a recovered decision.
+ */
 function parseRecoveredTrustRecord(
+  value: Record<string, unknown>,
+  expectedTransactionId: string,
+): ParmanaExecutionResult {
+  return parseApprovedOrDeniedFromTrustRecord(value, expectedTransactionId);
+}
+
+function parseApprovedOrDeniedFromTrustRecord(
   value: Record<string, unknown>,
   expectedTransactionId: string,
 ): ParmanaExecutionResult {
@@ -129,18 +165,34 @@ function parseRecoveredTrustRecord(
     throw new Error("Parmana recovery returned a mismatched business transaction");
   }
 
-  const executions = Array.isArray(value["executions"]) ? value["executions"] : [];
-  const execution = executions.at(-1);
-  const decision = isRecord(execution) && isRecord(execution["decision"])
-    ? execution["decision"]
-    : undefined;
+  const executions = Array.isArray(value["executions"]) ? value["executions"].filter(isRecord) : [];
+  const lastExecution = executions.at(-1);
+
+  if (!lastExecution) throw new Error("Parmana recovery returned no persisted decision");
+
+  const decision = isRecord(lastExecution["decision"]) ? lastExecution["decision"] : undefined;
 
   if (!decision) throw new Error("Parmana recovery returned no persisted decision");
 
+  const outcome = String(decision["outcome"] ?? "");
+
+  if (outcome === "APPROVED") {
+    const authorizationEnvelope = value["authorization"];
+    const payload = isRecord(authorizationEnvelope) ? authorizationEnvelope["payload"] : undefined;
+    const executionMetadata = isRecord(lastExecution["metadata"]) ? lastExecution["metadata"] : undefined;
+    const authorizationId =
+      (isRecord(payload) && typeof payload["authorizationId"] === "string" ? payload["authorizationId"] : undefined) ??
+      (executionMetadata && typeof executionMetadata["authorizationId"] === "string" ? executionMetadata["authorizationId"] : undefined);
+
+    if (!authorizationId) throw new Error("Parmana recovery returned an APPROVED decision with no authorizationId");
+
+    return { outcome: "APPROVED", businessTransactionId: expectedTransactionId, authorizationId, trustRecord: value };
+  }
+
   return {
-    transaction: transaction as unknown as ParmanaExecutionResult["transaction"],
-    context: { decision },
-    trustRecord: value,
+    outcome: "DENIED",
+    businessTransactionId: expectedTransactionId,
+    reason: typeof decision["reason"] === "string" ? decision["reason"] : "Parmana policy rejected the refund",
   };
 }
 
@@ -170,39 +222,6 @@ function deterministicUuid(seed: string): string {
   bytes[8] = (byte8 & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function extractDecision(raw: ParmanaExecutionResult): AuthorizationDecision {
-  const candidates = [
-    raw.context["decision"],
-    raw.context["policyDecision"],
-    raw.trustRecord["decision"],
-    raw.trustRecord["outcome"],
-    ...extractExecutionDecisions(raw.trustRecord),
-  ];
-
-  for (const candidate of candidates) {
-    if (!isRecord(candidate)) continue;
-    const outcome = String(candidate["outcome"] ?? candidate["decision"] ?? candidate["action"] ?? "").toUpperCase();
-    if (outcome === "APPROVE" || outcome === "APPROVED") {
-      const authorizationId = String(candidate["authorizationId"] ?? raw.transaction.authorization["authorizationId"] ?? "");
-      if (!authorizationId) throw new Error("Parmana approval did not contain authorizationId");
-      return { decision: "APPROVED", authorizationId };
-    }
-    if (outcome === "REJECT" || outcome === "REJECTED" || outcome === "DENY" || outcome === "DENIED") {
-      const authorizationId = String(candidate["authorizationId"] ?? raw.transaction.authorization["authorizationId"] ?? "");
-      return { decision: "DENIED", authorizationId, reason: String(candidate["reason"] ?? "Parmana policy rejected the refund") };
-    }
-  }
-  throw new Error("Unable to determine Parmana authorization outcome from persisted evidence");
-}
-
-function extractExecutionDecisions(record: Record<string, unknown>): Record<string, unknown>[] {
-  const executions = Array.isArray(record["executions"]) ? record["executions"] : [];
-  return executions
-    .filter(isRecord)
-    .map((execution) => execution["decision"])
-    .filter(isRecord);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
