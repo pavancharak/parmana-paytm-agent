@@ -22,7 +22,7 @@ export class GovernedPaytmRefundService {
       if (["CONFIRMED", "SUBMITTED", "PENDING", "UNKNOWN"].includes(existing.status)) throw new Error("refund already submitted or ambiguous for refId; reconcile status before retrying");
     }
 
-    const authorization = await this.authorizer.authorizeRefund({ orderId: request.orderId, txnId: request.txnId, amount: request.amount, signals: request.signals });
+    const authorization = await this.authorizer.authorizeRefund({ refId: request.refId, orderId: request.orderId, txnId: request.txnId, amount: request.amount, signals: request.signals });
     if (authorization.decision.decision === "DENIED") return { decision: "DENIED", authorizationId: authorization.decision.authorizationId, transactionId: authorization.transactionId, reason: authorization.decision.reason };
 
     bindAuthorizedRefund({ orderId: authorization.orderId, txnId: authorization.txnId, amount: authorization.amount, authorizationId: authorization.decision.authorizationId }, { orderId: request.orderId, txnId: request.txnId, amount: request.amount });
