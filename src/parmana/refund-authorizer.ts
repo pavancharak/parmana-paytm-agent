@@ -91,7 +91,7 @@ export class ParmanaRefundAuthorizer {
 
     try {
       const raw = await this.client.execute(transaction);
-      return this.toAuthorization(raw, orderId(input), txnId(input), amount);
+      return this.toAuthorization(raw, input.orderId, input.txnId, amount);
     } catch (error) {
       if (!(error instanceof ParmanaExecutionAmbiguousError)) throw error;
 
@@ -120,9 +120,6 @@ export class ParmanaRefundAuthorizer {
   }
 }
 
-function orderId(input: RefundAuthorizationInput): string { return input.orderId; }
-function txnId(input: RefundAuthorizationInput): string { return input.txnId; }
-
 function parseRecoveredTrustRecord(
   value: Record<string, unknown>,
   expectedTransactionId: string,
@@ -141,7 +138,7 @@ function parseRecoveredTrustRecord(
   if (!decision) throw new Error("Parmana recovery returned no persisted decision");
 
   return {
-    transaction: transaction as ParmanaExecutionResult["transaction"],
+    transaction: transaction as unknown as ParmanaExecutionResult["transaction"],
     context: { decision },
     trustRecord: value,
   };
@@ -166,8 +163,11 @@ export function deterministicRefundTransactionId(refId: string): string {
 function deterministicUuid(seed: string): string {
   const digest = crypto.createHash("sha256").update(seed, "utf8").digest();
   const bytes = Buffer.from(digest.subarray(0, 16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const byte6 = bytes[6];
+  const byte8 = bytes[8];
+  if (byte6 === undefined || byte8 === undefined) throw new Error("unable to construct deterministic UUID");
+  bytes[6] = (byte6 & 0x0f) | 0x40;
+  bytes[8] = (byte8 & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
