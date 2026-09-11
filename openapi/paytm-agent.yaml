@@ -17,6 +17,8 @@ paths:
       operationId: proposeRefund
       summary: Propose a customer refund
       description: The agent proposes the refund. Parmana evaluates the same customer-refund policy; Paytm is called only after approval and exact parameter binding.
+      security:
+        - AgentBearerAuth: []
       requestBody:
         required: true
         content:
@@ -30,6 +32,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApprovedRefund'
+        '401':
+          description: Missing or invalid agent API key
         '403':
           description: Parmana denied the refund; Paytm was not invoked
           content:
@@ -39,6 +43,12 @@ paths:
         '500':
           description: Fail-closed integration error
 components:
+  securitySchemes:
+    AgentBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+      description: Inbound API credential for the agent-facing endpoint. This authenticates the caller; Parmana remains the authorization authority for refunds.
   schemas:
     RefundSignals:
       type: object
