@@ -40,25 +40,19 @@ export class ParmanaHttpClient {
       body: transaction,
     });
 
-    if (response.ok) {
-      return parseExecutionResult(response.status, response.body);
+    if (!response.ok) {
+      if (response.status === 409 || response.status >= 500) {
+        throw new Error(
+          `Parmana execution outcome is ambiguous (HTTP ${response.status}); reconcile the persisted transaction before retrying: ${safeJson(response.body)}`,
+        );
+      }
+      throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(response.body)}`);
     }
 
-    // Parmana persists the Business Transaction and Trust Record before a
-    // downstream connector/dispatch error can surface. A duplicate request
-    // therefore must recover the persisted evidence rather than re-authorize.
-    // This is especially important while the live Parmana deployment has no
-    // Paytm connector registered: an APPROVE can be durable even when the
-    // final dispatch step returns 500.
-    if (response.status === 409 || response.status >= 500) {
-      const recovered = await this.getExecution(transaction.businessTransactionId);
-      if (recovered) return recovered;
-    }
-
-    throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(response.body)}`);
+    return parseExecutionResult(response.status, response.body);
   }
 
-  async getExecution(businessTransactionId: string): Promise<ParmanaExecutionResult | null> {
+  async getReceipt(businessTransactionId: string): Promise<Record<string, unknown> | null> {
     const encodedId = encodeURIComponent(businessTransactionId);
     const response = await this.request(`/receipt/${encodedId}`, { method: "GET" });
 
@@ -66,20 +60,10 @@ export class ParmanaHttpClient {
     if (!response.ok) {
       throw new Error(`Parmana receipt API HTTP ${response.status}: ${safeJson(response.body)}`);
     }
-
     if (!isRecord(response.body)) {
       throw new Error("Parmana returned an invalid receipt response");
     }
-
-    // The receipt endpoint intentionally returns only the latest receipt, not
-    // the full Trust Record. The live API therefore cannot currently reconstruct
-    // ParmanaExecutionResult from this endpoint alone. Keep this method strict:
-    // only accept a full execution object if a compatible deployment returns one.
-    if (isRecord(response.body["trustRecord"]) && isRecord(response.body["transaction"])) {
-      return response.body as unknown as ParmanaExecutionResult;
-    }
-
-    return null;
+    return response.body;
   }
 
   private async request(
