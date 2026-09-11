@@ -1,0 +1,78 @@
+openapi: 3.0.3
+info:
+  title: Parmana Paytm Agent API
+  version: 0.1.0
+  description: Agent-facing refund API. Every refund is authorized by Parmana before Paytm execution.
+servers:
+  - url: http://localhost:3000
+paths:
+  /health:
+    get:
+      operationId: health
+      responses:
+        '200':
+          description: Service healthy
+  /agent/refunds:
+    post:
+      operationId: proposeRefund
+      summary: Propose a customer refund
+      description: The agent proposes the refund. Parmana evaluates the same customer-refund policy; Paytm is called only after approval and exact parameter binding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundProposal'
+      responses:
+        '200':
+          description: Parmana approved and Paytm was invoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovedRefund'
+        '403':
+          description: Parmana denied the refund; Paytm was not invoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeniedRefund'
+        '500':
+          description: Fail-closed integration error
+components:
+  schemas:
+    RefundSignals:
+      type: object
+      required: [refundEligible, managerApproved, fraudCheckPassed, maximumRefundAmount]
+      properties:
+        refundEligible: { type: boolean }
+        managerApproved: { type: boolean }
+        fraudCheckPassed: { type: boolean }
+        maximumRefundAmount: { type: number, exclusiveMinimum: 0 }
+    RefundProposal:
+      type: object
+      required: [orderId, txnId, amount, signals]
+      properties:
+        orderId: { type: string, minLength: 1 }
+        txnId: { type: string, minLength: 1 }
+        refId: { type: string, minLength: 1 }
+        amount: { type: string, pattern: '^[0-9]+(\\.[0-9]{1,2})?$' }
+        reason: { type: string }
+        signals:
+          $ref: '#/components/schemas/RefundSignals'
+    ApprovedRefund:
+      type: object
+      required: [decision, authorizationId, transactionId, paytm]
+      properties:
+        decision: { type: string, enum: [APPROVED] }
+        authorizationId: { type: string }
+        transactionId: { type: string }
+        paytm:
+          type: object
+    DeniedRefund:
+      type: object
+      required: [decision, authorizationId, transactionId, reason]
+      properties:
+        decision: { type: string, enum: [DENIED] }
+        authorizationId: { type: string }
+        transactionId: { type: string }
+        reason: { type: string }
