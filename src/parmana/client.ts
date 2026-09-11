@@ -22,6 +22,20 @@ export interface ParmanaExecutionResult {
   trustRecord: Record<string, unknown>;
 }
 
+export class ParmanaExecutionAmbiguousError extends Error {
+  readonly status: number;
+  readonly transactionId: string;
+
+  constructor(status: number, transactionId: string, body: unknown) {
+    super(
+      `Parmana execution outcome is ambiguous (HTTP ${status}) for transaction ${transactionId}; reconcile the persisted transaction before retrying: ${safeJson(body)}`,
+    );
+    this.name = "ParmanaExecutionAmbiguousError";
+    this.status = status;
+    this.transactionId = transactionId;
+  }
+}
+
 export class ParmanaHttpClient {
   private readonly baseUrl: string;
 
@@ -35,15 +49,14 @@ export class ParmanaHttpClient {
   }
 
   async execute(transaction: BusinessTransaction): Promise<ParmanaExecutionResult> {
-    const response = await this.request("/execute", {
-      method: "POST",
-      body: transaction,
-    });
+    const response = await this.request("/execute", { method: "POST", body: transaction });
 
     if (!response.ok) {
       if (response.status === 409 || response.status >= 500) {
-        throw new Error(
-          `Parmana execution outcome is ambiguous (HTTP ${response.status}); reconcile the persisted transaction before retrying: ${safeJson(response.body)}`,
+        throw new ParmanaExecutionAmbiguousError(
+          response.status,
+          transaction.businessTransactionId,
+          response.body,
         );
       }
       throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(response.body)}`);
@@ -52,16 +65,20 @@ export class ParmanaHttpClient {
     return parseExecutionResult(response.status, response.body);
   }
 
-  async getReceipt(businessTransactionId: string): Promise<Record<string, unknown> | null> {
+  /**
+   * Durable recovery path. Parmana's Trust Record is the authoritative
+   * persisted decision/evidence for a business transaction.
+   */
+  async getTrustRecord(businessTransactionId: string): Promise<Record<string, unknown> | null> {
     const encodedId = encodeURIComponent(businessTransactionId);
-    const response = await this.request(`/receipt/${encodedId}`, { method: "GET" });
+    const response = await this.request(`/trust-records/${encodedId}`, { method: "GET" });
 
     if (response.status === 404) return null;
     if (!response.ok) {
-      throw new Error(`Parmana receipt API HTTP ${response.status}: ${safeJson(response.body)}`);
+      throw new Error(`Parmana trust-record API HTTP ${response.status}: ${safeJson(response.body)}`);
     }
     if (!isRecord(response.body)) {
-      throw new Error("Parmana returned an invalid receipt response");
+      throw new Error("Parmana returned an invalid trust record response");
     }
     return response.body;
   }
@@ -92,7 +109,6 @@ export class ParmanaHttpClient {
       } catch {
         throw new Error(`Parmana returned non-JSON response (HTTP ${response.status})`);
       }
-
       return { status: response.status, ok: response.ok, body };
     } finally {
       clearTimeout(timeout);
@@ -101,9 +117,7 @@ export class ParmanaHttpClient {
 }
 
 function parseExecutionResult(status: number, value: unknown): ParmanaExecutionResult {
-  if (!isRecord(value)) {
-    throw new Error(`Parmana returned an invalid execution response (HTTP ${status})`);
-  }
+  if (!isRecord(value)) throw new Error(`Parmana returned an invalid execution response (HTTP ${status})`);
   if (!isRecord(value["transaction"]) || !isRecord(value["context"]) || !isRecord(value["trustRecord"])) {
     throw new Error("Parmana returned an incomplete execution response");
   }
@@ -115,9 +129,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return "<unserializable>";
-  }
+  try { return JSON.stringify(value); } catch { return "<unserializable>"; }
 }
