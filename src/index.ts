@@ -1,6 +1,6 @@
 export * from "./parmana/authorization.js";
 export * from "./parmana/client.js";
-export * from "./parmana/refund-authorizer.js";
+export { ParmanaRefundAuthorizer } from "./parmana/refund-authorizer.js";
 export * from "./governed-refund.js";
 export * from "./agent/refund-agent.js";
 export * from "./paytm/auth.js";
