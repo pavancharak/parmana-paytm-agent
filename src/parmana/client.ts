@@ -35,42 +35,95 @@ export class ParmanaHttpClient {
   }
 
   async execute(transaction: BusinessTransaction): Promise<ParmanaExecutionResult> {
+    const response = await this.request("/execute", {
+      method: "POST",
+      body: transaction,
+    });
+
+    if (response.ok) {
+      return parseExecutionResult(response.status, response.body);
+    }
+
+    // Parmana persists the Business Transaction and Trust Record before a
+    // downstream connector/dispatch error can surface. A duplicate request
+    // therefore must recover the persisted evidence rather than re-authorize.
+    // This is especially important while the live Parmana deployment has no
+    // Paytm connector registered: an APPROVE can be durable even when the
+    // final dispatch step returns 500.
+    if (response.status === 409 || response.status >= 500) {
+      const recovered = await this.getExecution(transaction.businessTransactionId);
+      if (recovered) return recovered;
+    }
+
+    throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(response.body)}`);
+  }
+
+  async getExecution(businessTransactionId: string): Promise<ParmanaExecutionResult | null> {
+    const encodedId = encodeURIComponent(businessTransactionId);
+    const response = await this.request(`/receipt/${encodedId}`, { method: "GET" });
+
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`Parmana receipt API HTTP ${response.status}: ${safeJson(response.body)}`);
+    }
+
+    if (!isRecord(response.body)) {
+      throw new Error("Parmana returned an invalid receipt response");
+    }
+
+    // The receipt endpoint intentionally returns only the latest receipt, not
+    // the full Trust Record. The live API therefore cannot currently reconstruct
+    // ParmanaExecutionResult from this endpoint alone. Keep this method strict:
+    // only accept a full execution object if a compatible deployment returns one.
+    if (isRecord(response.body["trustRecord"]) && isRecord(response.body["transaction"])) {
+      return response.body as unknown as ParmanaExecutionResult;
+    }
+
+    return null;
+  }
+
+  private async request(
+    path: string,
+    options: { method: "GET" | "POST"; body?: unknown },
+  ): Promise<{ status: number; ok: boolean; body: unknown }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
 
     try {
-      const response = await fetch(`${this.baseUrl}/execute`, {
-        method: "POST",
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        method: options.method,
         headers: {
-          "content-type": "application/json",
           accept: "application/json",
+          ...(options.body !== undefined ? { "content-type": "application/json" } : {}),
           authorization: `Bearer ${this.config.apiKey}`,
         },
-        body: JSON.stringify(transaction),
+        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
         signal: controller.signal,
       });
 
       const text = await response.text();
-      let parsed: unknown;
+      let body: unknown;
       try {
-        parsed = JSON.parse(text);
+        body = JSON.parse(text);
       } catch {
         throw new Error(`Parmana returned non-JSON response (HTTP ${response.status})`);
       }
 
-      if (!response.ok) {
-        throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(parsed)}`);
-      }
-
-      if (!isRecord(parsed)) {
-        throw new Error("Parmana returned an invalid execution response");
-      }
-
-      return parsed as unknown as ParmanaExecutionResult;
+      return { status: response.status, ok: response.ok, body };
     } finally {
       clearTimeout(timeout);
     }
   }
+}
+
+function parseExecutionResult(status: number, value: unknown): ParmanaExecutionResult {
+  if (!isRecord(value)) {
+    throw new Error(`Parmana returned an invalid execution response (HTTP ${status})`);
+  }
+  if (!isRecord(value["transaction"]) || !isRecord(value["context"]) || !isRecord(value["trustRecord"])) {
+    throw new Error("Parmana returned an incomplete execution response");
+  }
+  return value as unknown as ParmanaExecutionResult;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
