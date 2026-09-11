@@ -6,5 +6,6 @@ export * from "./agent/refund-agent.js";
 export * from "./paytm/auth.js";
 export * from "./paytm/client.js";
 export * from "./paytm/refund.js";
+export * from "./paytm/reconciliation.js";
 export * from "./paytm/types.js";
 export * from "./paytm/webhook.js";
