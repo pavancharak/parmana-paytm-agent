@@ -3,6 +3,7 @@ import { PaytmHttpClient } from "../paytm/client.js";
 import { PaytmRefundConnector } from "../paytm/refund.js";
 import { ParmanaHttpClient } from "../parmana/client.js";
 import { ParmanaRefundAuthorizer } from "../parmana/refund-authorizer.js";
+import { verifyPaytmAuthorizationSignature } from "../parmana/authorization.js";
 import { GovernedPaytmRefundService } from "../governed-refund.js";
 import { RefundAgent } from "../agent/refund-agent.js";
 
@@ -78,7 +79,7 @@ function authorized(header: string | undefined, expected: string): boolean {
   return header.slice(7) === expected;
 }
 
-async function executeAuthorizedConnectorRequest(body: Record<string, unknown>, connector: PaytmRefundConnector): Promise<Record<string, unknown>> {
+export async function executeAuthorizedConnectorRequest(body: Record<string, unknown>, connector: PaytmRefundConnector): Promise<Record<string, unknown>> {
   const transaction = asRecord(body.transaction, "transaction");
   const intent = asRecord(transaction.intent, "transaction.intent");
   const authorization = asRecord(body.authorization, "authorization");
@@ -96,6 +97,39 @@ async function executeAuthorizedConnectorRequest(body: Record<string, unknown>, 
   const txnId = requireParameter(parameters, "txnId");
   const refId = requireParameter(parameters, "refId");
   const amount = requireParameter(parameters, "amount");
+
+  // ADR-0009 Phase 2B: the bearer shared secret above is transport
+  // authentication between Parmana and this service -- it proves the
+  // caller knows the secret, never that Parmana's policy engine
+  // actually approved these specific parameters. This is the check
+  // that does: without it, anyone holding the shared secret could
+  // call this endpoint directly with self-chosen orderId/txnId/amount,
+  // bypassing Parmana's policy engine, rate limits, and spend caps
+  // entirely -- which is exactly what this service's own /agent/refunds
+  // path (ParmanaRefundAuthorizer, above) exists to prevent for
+  // requests originating from an agent, and what this endpoint had no
+  // equivalent protection against for requests claiming to already be
+  // Parmana-authorized.
+  const expiresAt = Number(payload.expiresAt);
+  const signature = String(authorization.signature ?? "");
+  const keyId = String(authorization.keyId ?? "");
+  if (!Number.isFinite(expiresAt)) throw new Error("authorization.payload.expiresAt is required");
+  if (!signature) throw new Error("authorization.signature is required");
+  if (!keyId) throw new Error("authorization.keyId is required");
+
+  await verifyPaytmAuthorizationSignature({
+    parmanaBaseUrl: config.parmanaUrl,
+    timeoutMs: config.timeoutMs,
+    businessTransactionId: transactionId,
+    action,
+    orderId,
+    txnId,
+    amount,
+    expiresAt,
+    signature,
+    keyId,
+  });
+
   const paytmResult = await connector.initiateRefund({ orderId, txnId, refId, amount });
   const resultStatus = String(paytmResult.body.resultStatus ?? "").toUpperCase();
   const success = resultStatus === "S" || resultStatus === "SUCCESS";
