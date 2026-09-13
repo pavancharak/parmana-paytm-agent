@@ -146,7 +146,9 @@ Expect `200`, `{"decision":"APPROVED", "paytm": {...}}`.
 
 ## What this document does not cover
 
-- `POST /connector/paytm-refund` (the other endpoint this service exposes) — see `docs/ARCHITECTURE.md`.
+- `POST /connector/paytm-refund` (the other endpoint this service exposes) — see `docs/SECURITY.md`'s
+  "Connector authorization (`/connector/paytm-refund`)" section for its trust model, and
+  `AgentLabsBuildathon`'s `docs/connectors/PAYTM_CONNECTOR.md` for the full wire contract.
 - Adding a durable idempotency store — open work, not yet implemented here.
 - The direct-to-Parmana integration pattern (`parmana-phinite-agent`) — see AgentLabsBuildathon's
   `docs/connectors/CONNECTING_AN_AGENT.md`.
