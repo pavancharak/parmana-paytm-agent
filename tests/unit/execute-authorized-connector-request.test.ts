@@ -17,7 +17,18 @@ const REQUIRED_ENV: Record<string, string> = {
   PAYTM_MERCHANT_ID: "test-merchant",
   PAYTM_MERCHANT_KEY: "0123456789abcdef", // exactly 16 bytes, required by assertMerchantKey
   PAYTM_ENVIRONMENT: "staging",
+  // GAP-3: only needed so loadConfig()'s own required() check (module
+  // load, beforeAll below) doesn't throw -- the fake audit recorder
+  // this file injects into every executeAuthorizedConnectorRequest()
+  // call never actually opens a Postgres connection with it.
+  DATABASE_URL: "postgresql://test:test@localhost:5432/test",
 };
+
+// GAP-3: a no-op stand-in for recordPaytmAgentAuditEvent, injected into
+// every call below so these unit tests never touch a real Postgres
+// connection -- mirrors fakeConnector()'s own reasoning for
+// PaytmRefundConnector.
+async function fakeAuditRecorder(): Promise<void> {}
 
 // executeAuthorizedConnectorRequest lives in src/server/handler.ts,
 // whose module scope constructs real ParmanaHttpClient/PaytmHttpClient/
@@ -129,7 +140,7 @@ describe("executeAuthorizedConnectorRequest (ADR-0009 Phase 2B)", () => {
   });
 
   it("executes the refund when the authorization is genuinely signed and unexpired", async () => {
-    const result = await executeAuthorizedConnectorRequest(requestBody(), fakeConnector());
+    const result = await executeAuthorizedConnectorRequest(requestBody(), fakeConnector(), fakeAuditRecorder);
 
     expect(result.success).toBe(true);
     expect(result.businessTransactionId).toBe("btx-1");
@@ -140,6 +151,7 @@ describe("executeAuthorizedConnectorRequest (ADR-0009 Phase 2B)", () => {
       executeAuthorizedConnectorRequest(
         requestBody({ omitSignatureFields: true }),
         fakeConnector(),
+        fakeAuditRecorder,
       ),
     ).rejects.toThrow(/authorization\.signature is required/);
   });
@@ -149,6 +161,7 @@ describe("executeAuthorizedConnectorRequest (ADR-0009 Phase 2B)", () => {
       executeAuthorizedConnectorRequest(
         requestBody({ expiresAt: Date.now() - 1_000 }),
         fakeConnector(),
+        fakeAuditRecorder,
       ),
     ).rejects.toThrow(/expired/);
   });
@@ -167,6 +180,7 @@ describe("executeAuthorizedConnectorRequest (ADR-0009 Phase 2B)", () => {
       executeAuthorizedConnectorRequest(
         requestBody({ amount: "999999.00", signature: signFor(signed) }), // ... but claiming 999999.00
         fakeConnector(),
+        fakeAuditRecorder,
       ),
     ).rejects.toThrow(/signature is invalid/);
   });
@@ -181,7 +195,78 @@ describe("executeAuthorizedConnectorRequest (ADR-0009 Phase 2B)", () => {
       executeAuthorizedConnectorRequest(
         requestBody({ omitSignatureFields: true, amount: "999999.00" }),
         fakeConnector(),
+        fakeAuditRecorder,
       ),
     ).rejects.toThrow();
+  });
+
+  it("(GAP-3) records authorization.verified then execution.completed, in order, on a successful refund", async () => {
+    const events: string[] = [];
+    const recordAuditEvent = vi.fn(async (event: { type: string }) => {
+      events.push(event.type);
+    });
+
+    await executeAuthorizedConnectorRequest(requestBody(), fakeConnector(), recordAuditEvent);
+
+    expect(events).toEqual(["authorization.verified", "execution.completed"]);
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ businessTransactionId: "btx-1", action: "paytm-refund" }),
+    );
+  });
+
+  it("(GAP-3) records only execution.rejected, with the verification failure as the reason, when signature verification fails -- never authorization.verified", async () => {
+    const events: string[] = [];
+    const recordAuditEvent = vi.fn(async (event: { type: string; reason?: string }) => {
+      events.push(event.type);
+    });
+
+    // Reaches verifyPaytmAuthorizationSignature itself (unlike
+    // omitSignatureFields/missing-parameter cases, which throw earlier,
+    // from this function's own synchronous field checks -- before the
+    // try/catch this audit wrapping wraps around that call).
+    await expect(
+      executeAuthorizedConnectorRequest(
+        requestBody({ expiresAt: Date.now() - 1_000 }),
+        fakeConnector(),
+        recordAuditEvent,
+      ),
+    ).rejects.toThrow(/expired/);
+
+    expect(events).toEqual(["execution.rejected"]);
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: expect.stringMatching(/expired/),
+      }),
+    );
+  });
+
+  it("(GAP-3) records execution.rejected with the Paytm failure reason when the authorization verifies but Paytm itself declines the refund", async () => {
+    const events: string[] = [];
+    const recordAuditEvent = vi.fn(async (event: { type: string; reason?: string }) => {
+      events.push(event.type);
+    });
+
+    const decliningTransport: PaytmTransport = {
+      post: vi.fn().mockResolvedValue({
+        body: { resultStatus: "F", resultCode: "334" },
+        head: {},
+        raw: {},
+      }),
+    };
+
+    const result = await executeAuthorizedConnectorRequest(
+      requestBody(),
+      new PaytmRefundConnector(decliningTransport),
+      recordAuditEvent,
+    );
+
+    expect(result.success).toBe(false);
+    expect(events).toEqual(["authorization.verified", "execution.rejected"]);
+    expect(recordAuditEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "execution.rejected",
+        reason: expect.stringContaining("resultStatus=F"),
+      }),
+    );
   });
 });

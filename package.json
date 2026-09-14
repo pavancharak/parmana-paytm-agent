@@ -11,9 +11,12 @@
     "lint": "eslint .",
     "start": "node --import tsx src/server/index.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "pg": "^8.22.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.3",
     "eslint": "^9.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.0.0",

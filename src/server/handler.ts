@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { PaytmHttpClient } from "../paytm/client.js";
 import { PaytmRefundConnector } from "../paytm/refund.js";
 import { ParmanaHttpClient } from "../parmana/client.js";
@@ -6,6 +7,7 @@ import { ParmanaRefundAuthorizer } from "../parmana/refund-authorizer.js";
 import { verifyPaytmAuthorizationSignature } from "../parmana/authorization.js";
 import { GovernedPaytmRefundService } from "../governed-refund.js";
 import { RefundAgent } from "../agent/refund-agent.js";
+import { recordPaytmAgentAuditEvent } from "../parmana/audit.js";
 
 /**
  * The request handler itself, extracted from a listening http.Server so
@@ -71,6 +73,12 @@ function loadConfig() {
     paytmEnvironment,
     paytmMerchantId: required("PAYTM_MERCHANT_ID"),
     paytmMerchantKey: required("PAYTM_MERCHANT_KEY"),
+    // GAP-3: fails closed at startup, matching every other setting this
+    // service refuses to run without -- audit.ts reads this same
+    // variable itself, lazily, when it first needs a pool; checking it
+    // here too means a missing DATABASE_URL is a startup error, not a
+    // surprise on the first refund request.
+    databaseUrl: required("DATABASE_URL"),
   } as const;
 }
 
@@ -79,7 +87,15 @@ function authorized(header: string | undefined, expected: string): boolean {
   return header.slice(7) === expected;
 }
 
-export async function executeAuthorizedConnectorRequest(body: Record<string, unknown>, connector: PaytmRefundConnector): Promise<Record<string, unknown>> {
+export async function executeAuthorizedConnectorRequest(
+  body: Record<string, unknown>,
+  connector: PaytmRefundConnector,
+  // GAP-3: dependency-injected, mirroring `connector` above, so unit
+  // tests can exercise this function without a real Postgres
+  // connection -- see tests/unit/execute-authorized-connector-request.test.ts.
+  // requestHandler's own call site relies on this default.
+  recordAuditEvent: (event: Parameters<typeof recordPaytmAgentAuditEvent>[0]) => Promise<void> = recordPaytmAgentAuditEvent,
+): Promise<Record<string, unknown>> {
   const transaction = asRecord(body.transaction, "transaction");
   const intent = asRecord(transaction.intent, "transaction.intent");
   const authorization = asRecord(body.authorization, "authorization");
@@ -117,22 +133,74 @@ export async function executeAuthorizedConnectorRequest(body: Record<string, unk
   if (!signature) throw new Error("authorization.signature is required");
   if (!keyId) throw new Error("authorization.keyId is required");
 
-  await verifyPaytmAuthorizationSignature({
-    parmanaBaseUrl: config.parmanaUrl,
-    timeoutMs: config.timeoutMs,
+  // GAP-3: one HTTP call gets one sessionId, so repeated attempts at the
+  // same refId (idempotent retries) are visible as distinct rows under
+  // one authorization_id -- see audit.ts's own doc comment.
+  const auditSessionId = randomUUID();
+
+  try {
+    await verifyPaytmAuthorizationSignature({
+      parmanaBaseUrl: config.parmanaUrl,
+      timeoutMs: config.timeoutMs,
+      businessTransactionId: transactionId,
+      action,
+      orderId,
+      txnId,
+      amount,
+      expiresAt,
+      signature,
+      keyId,
+    });
+  } catch (error) {
+    await recordAuditEvent({
+      type: "execution.rejected",
+      refId,
+      sessionId: auditSessionId,
+      businessTransactionId: transactionId,
+      action,
+      reason: error instanceof Error ? error.message : "authorization verification failed",
+    });
+    throw error;
+  }
+
+  await recordAuditEvent({
+    type: "authorization.verified",
+    refId,
+    sessionId: auditSessionId,
     businessTransactionId: transactionId,
     action,
-    orderId,
-    txnId,
-    amount,
-    expiresAt,
-    signature,
-    keyId,
   });
 
-  const paytmResult = await connector.initiateRefund({ orderId, txnId, refId, amount });
+  let paytmResult;
+  try {
+    paytmResult = await connector.initiateRefund({ orderId, txnId, refId, amount });
+  } catch (error) {
+    await recordAuditEvent({
+      type: "execution.rejected",
+      refId,
+      sessionId: auditSessionId,
+      businessTransactionId: transactionId,
+      action,
+      reason: error instanceof Error ? error.message : "Paytm refund call failed",
+    });
+    throw error;
+  }
+
   const resultStatus = String(paytmResult.body.resultStatus ?? "").toUpperCase();
   const success = resultStatus === "S" || resultStatus === "SUCCESS";
+
+  await recordAuditEvent({
+    type: success ? "execution.completed" : "execution.rejected",
+    refId,
+    sessionId: auditSessionId,
+    businessTransactionId: transactionId,
+    action,
+    ...(success
+      ? {}
+      : {
+          reason: `Paytm refund did not succeed: resultStatus=${resultStatus || "UNKNOWN"}, resultCode=${String(paytmResult.body.resultCode ?? "UNKNOWN")}`,
+        }),
+  });
 
   return {
     businessTransactionId: transactionId,
