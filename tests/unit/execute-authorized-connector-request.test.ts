@@ -269,4 +269,64 @@ describe("executeAuthorizedConnectorRequest (ADR-0009 Phase 2B)", () => {
       }),
     );
   });
+
+  describe("with the real nested Paytm response shape (body.resultInfo)", () => {
+    function transportReturning(body: Record<string, unknown>): PaytmRefundConnector {
+      return new PaytmRefundConnector({ post: vi.fn().mockResolvedValue({ body, head: {}, raw: {} }) });
+    }
+
+    it("records the real status and code when Paytm declines, not UNKNOWN", async () => {
+      const recordAuditEvent = vi.fn(async () => {});
+
+      const result = await executeAuthorizedConnectorRequest(
+        requestBody(),
+        transportReturning({ resultInfo: { resultStatus: "TXN_FAILURE", resultCode: "335", resultMsg: "Invalid merchant Id." } }),
+        recordAuditEvent,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.metadata).toEqual({ provider: "paytm", resultStatus: "TXN_FAILURE", resultCode: "335" });
+      expect(recordAuditEvent).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: "execution.rejected",
+          reason: "Paytm refund did not succeed: resultStatus=TXN_FAILURE, resultCode=335, resultMsg=Invalid merchant Id.",
+        }),
+      );
+    });
+
+    it("reports a confirmed success as a success", async () => {
+      const events: string[] = [];
+      const recordAuditEvent = vi.fn(async (event: { type: string }) => {
+        events.push(event.type);
+      });
+
+      const result = await executeAuthorizedConnectorRequest(
+        requestBody(),
+        transportReturning({ resultInfo: { resultStatus: "TXN_SUCCESS", resultCode: "10" } }),
+        recordAuditEvent,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.metadata).toEqual({ provider: "paytm", resultStatus: "TXN_SUCCESS", resultCode: "10" });
+      expect(events).toEqual(["authorization.verified", "execution.completed"]);
+    });
+
+    it("does not report a PENDING refund as a success, and keeps the status visible for reconciliation", async () => {
+      const result = await executeAuthorizedConnectorRequest(
+        requestBody(),
+        transportReturning({ resultInfo: { resultStatus: "PENDING", resultCode: "601" } }),
+        fakeAuditRecorder,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.metadata).toEqual({ provider: "paytm", resultStatus: "PENDING", resultCode: "601" });
+    });
+
+    it("records UNKNOWN, and a null code, when Paytm returns no status at all", async () => {
+      const result = await executeAuthorizedConnectorRequest(requestBody(), transportReturning({}), fakeAuditRecorder);
+
+      expect(result.success).toBe(false);
+      expect(result.metadata).toEqual({ provider: "paytm", resultStatus: "UNKNOWN", resultCode: null });
+    });
+  });
 });

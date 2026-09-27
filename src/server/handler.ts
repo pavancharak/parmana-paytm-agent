@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { PaytmHttpClient } from "../paytm/client.js";
 import { PaytmRefundConnector } from "../paytm/refund.js";
+import { isConfirmedPaytmSuccess, readPaytmResult } from "../paytm/result.js";
 import { ParmanaHttpClient } from "../parmana/client.js";
 import { ParmanaRefundAuthorizer } from "../parmana/refund-authorizer.js";
 import { verifyPaytmAuthorizationSignature } from "../parmana/authorization.js";
@@ -186,8 +187,8 @@ export async function executeAuthorizedConnectorRequest(
     throw error;
   }
 
-  const resultStatus = String(paytmResult.body.resultStatus ?? "").toUpperCase();
-  const success = resultStatus === "S" || resultStatus === "SUCCESS";
+  const paytmOutcome = readPaytmResult(paytmResult.body);
+  const success = isConfirmedPaytmSuccess(paytmOutcome);
 
   await recordAuditEvent({
     type: success ? "execution.completed" : "execution.rejected",
@@ -198,7 +199,7 @@ export async function executeAuthorizedConnectorRequest(
     ...(success
       ? {}
       : {
-          reason: `Paytm refund did not succeed: resultStatus=${resultStatus || "UNKNOWN"}, resultCode=${String(paytmResult.body.resultCode ?? "UNKNOWN")}`,
+          reason: `Paytm refund did not succeed: resultStatus=${paytmOutcome.status}, resultCode=${paytmOutcome.code ?? "UNKNOWN"}${paytmOutcome.message ? `, resultMsg=${paytmOutcome.message}` : ""}`,
         }),
   });
 
@@ -209,7 +210,7 @@ export async function executeAuthorizedConnectorRequest(
     parameters: { orderId, txnId, refId, amount },
     success,
     executedAt: new Date().toISOString(),
-    metadata: { provider: "paytm", resultStatus: resultStatus || "UNKNOWN", resultCode: paytmResult.body.resultCode ?? null },
+    metadata: { provider: "paytm", resultStatus: paytmOutcome.status, resultCode: paytmOutcome.code },
   };
 }
 
