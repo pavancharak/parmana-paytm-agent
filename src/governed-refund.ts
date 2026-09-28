@@ -37,7 +37,7 @@ export class GovernedPaytmRefundService {
 
     let authorization;
     try {
-      authorization = await this.authorizer.authorizeRefund({ refId: request.refId, orderId: request.orderId, txnId: request.txnId, amount: request.amount, signals: request.signals, ...(request.approvalArtifact !== undefined ? { approvalArtifact: request.approvalArtifact } : {}) });
+      authorization = await this.authorizer.authorizeRefund({ refId: request.refId, orderId: request.orderId, txnId: request.txnId, amount: request.amount, signals: request.signals, ...(request.approvalArtifact !== undefined ? { approvalArtifact: request.approvalArtifact } : {}), ...(request.reason !== undefined ? { reason: request.reason } : {}) });
     } catch (error) {
       await this.store.put({ ...record, status: "UNKNOWN" });
       throw error;

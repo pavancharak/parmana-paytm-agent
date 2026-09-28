@@ -85,6 +85,7 @@ function requestBody(overrides: {
   keyId?: string;
   omitExpiresAt?: boolean;
   omitSignatureFields?: boolean;
+  reason?: string;
 } = {}) {
   const businessTransactionId = overrides.businessTransactionId ?? "btx-1";
   const amount = overrides.amount ?? "500.00";
@@ -105,7 +106,13 @@ function requestBody(overrides: {
       intent: {
         action: "paytm-refund",
         target: "paytm://orders/order-1",
-        parameters: { orderId: "order-1", txnId: "txn-1", refId: "refid-1", amount },
+        parameters: {
+          orderId: "order-1",
+          txnId: "txn-1",
+          refId: "refid-1",
+          amount,
+          ...(overrides.reason !== undefined ? { reason: overrides.reason } : {}),
+        },
       },
     },
     authorization: {
@@ -144,6 +151,17 @@ describe("executeAuthorizedConnectorRequest (ADR-0009 Phase 2B)", () => {
 
     expect(result.success).toBe(true);
     expect(result.businessTransactionId).toBe("btx-1");
+  });
+
+  it("G-71: passes Parmana's reason to Paytm as the refund comment, and sends none when there is none", async () => {
+    const post = vi.fn().mockResolvedValue({ body: { resultStatus: "S", resultCode: "00" }, head: {}, raw: {} });
+    const connector = new PaytmRefundConnector({ post } as PaytmTransport);
+
+    await executeAuthorizedConnectorRequest(requestBody({ reason: "Arrived damaged" }), connector, fakeAuditRecorder);
+    await executeAuthorizedConnectorRequest(requestBody(), connector, fakeAuditRecorder);
+
+    expect(post.mock.calls[0]?.[1]).toMatchObject({ refId: "refid-1", comments: "Arrived damaged" });
+    expect(post.mock.calls[1]?.[1]).not.toHaveProperty("comments");
   });
 
   it("rejects when authorization.signature is missing entirely", async () => {

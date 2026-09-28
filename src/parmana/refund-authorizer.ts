@@ -20,6 +20,8 @@ export interface RefundAuthorizationInput {
    * uses it once; this service never inspects its contents.
    */
   approvalArtifact?: Record<string, unknown>;
+  /** Sent to Paytm as the refund comment, through Parmana's connector call. */
+  reason?: string;
 }
 
 /**
@@ -103,19 +105,24 @@ export class ParmanaRefundAuthorizer {
         target: input.orderId,
         // The real, deployed paytm:refund capability's deny-by-default
         // parameter allowlist is exactly {orderId, transactionId,
-        // amount, refundReason} (packages/connector-paytm's
+        // amount, refundReason, refundReference} (packages/connector-paytm's
         // PAYTM_ALLOWED_REFUND_PARAMETERS in the Parmana repo) --
         // NOT txnId or refId. GatewayPaytmAdapter (Parmana's own
-        // execution gateway) derives refId itself, deterministically,
-        // from (orderId, transactionId) -- sending our own here would
-        // be silently ignored at best and refused outright at worst
-        // (confirmed: refused, HTTP 500 "unsupported refund
-        // parameters" against the real deployment). Parmana's
-        // `transactionId` is this integration's own `txnId`.
+        // execution gateway) derives the Paytm refId itself; any other
+        // name is refused ("unsupported refund parameters"), so this
+        // service needs a Parmana deploy that includes refundReference
+        // (G-71) before this one. Parmana's `transactionId` is this
+        // integration's own `txnId`.
         parameters: {
           amount: Number(amount),
           orderId: input.orderId,
           transactionId: input.txnId,
+          // G-71 (Parmana): this refund's own id. Parmana derives the
+          // Paytm refId from (orderId, transactionId, refundReference),
+          // so a retry with the same refId keeps one Paytm refId and a
+          // separate refund of the same transaction gets another.
+          refundReference: refId,
+          ...(input.reason?.trim() ? { refundReason: input.reason.trim() } : {}),
         },
         createdAt: issuedAt,
       },

@@ -91,6 +91,25 @@ describe("ParmanaRefundAuthorizer", () => {
     expect(signals?.["managerApproved"]).toBe(false);
   });
 
+  it("G-71: sends its refId as refundReference, so Parmana gives each refund its own Paytm refId", async () => {
+    const { client, authorizer } = fakeClient();
+
+    await authorizer.authorizeRefund(input);
+
+    const parameters = client.execute.mock.calls[0]?.[0].intent["parameters"];
+    expect(parameters).toEqual({ amount: 12000, orderId: "ORDER-9", transactionId: "TXN-9", refundReference: "REF-9" });
+  });
+
+  it("G-71: sends a non blank reason as refundReason", async () => {
+    const { client, authorizer } = fakeClient();
+
+    await authorizer.authorizeRefund({ ...input, reason: "  Arrived damaged " });
+    await authorizer.authorizeRefund({ ...input, refId: "REF-10", reason: "   " });
+
+    expect(client.execute.mock.calls[0]?.[0].intent["parameters"]).toMatchObject({ refundReason: "Arrived damaged" });
+    expect(client.execute.mock.calls[1]?.[0].intent["parameters"]).not.toHaveProperty("refundReason");
+  });
+
   it("returns what Paytm reported for the refund Parmana released", async () => {
     const { authorizer } = fakeClient();
 

@@ -60,9 +60,9 @@ trail of *which* agent instance proposed a given refund, that isn't provided by 
 |---|---|---|---|
 | `orderId` | string | yes | Sent to Parmana as `intent.target` and `intent.parameters.orderId`; Parmana's connector sends it to Paytm. |
 | `txnId` | string | yes | Sent to Parmana as `intent.parameters.transactionId` (note the field name difference); Parmana's connector sends it to Paytm as `txnId`. |
-| `refId` | string | **no** | If omitted, generated as `` PARMANA-<uuid> `` (`src/agent/refund-agent.ts`). It is this service's idempotency key and the seed of the Parmana business transaction id (the same `refId` always maps to the same transaction). It is **not** the refId Paytm sees: Parmana derives that from (`orderId`, `txnId`) (`deriveDeterministicPaytmRefId` in Parmana), and it is returned as `refund.refId`. |
+| `refId` | string | **no** | If omitted, generated as `` PARMANA-<uuid> `` (`src/agent/refund-agent.ts`). It is this service's idempotency key and the seed of the Parmana business transaction id (the same `refId` always maps to the same transaction). It is also sent to Parmana as `refundReference`, and Parmana derives the refId Paytm sees from (`orderId`, `txnId`, `refundReference`) (`deriveDeterministicPaytmRefId` in Parmana, G-71); that refId is returned as `refund.refId`. So a retry with the same `refId` keeps one Paytm refId, and a separate refund of the same `txnId` needs its own `refId`. At most 128 characters. |
 | `amount` | **string**, not a number | yes | `"500.00"`, not `500`. Validated as a positive finite number and normalized to two decimals (`normalizeAmount`, `src/governed-refund.ts`); a non positive or non numeric string fails with `500`. |
-| `reason` | string | no | Accepted but **not sent to Paytm**: Parmana's connector call carries only `orderId`, `txnId`, `refId` and `amount`. |
+| `reason` | string | no | Sent to Parmana as `refundReason`; Parmana passes it to `/connector/paytm-refund` as `reason`, which sends it to Paytm as the refund comment (G-71). At most 256 characters; a blank value is not sent. |
 | `signals.refundEligible` / `fraudCheckPassed` | boolean | yes | Forwarded to Parmana as policy signals. Must come from an independent business system, never inferred from what the customer said. Parmana does not verify them. |
 | `signals.managerApproved` | boolean | yes | Leave `false` unless you send `approvalArtifact`. Under `customer-refund` 1.1.0 Parmana refuses `managerApproved: true` without a signed approval it can verify. |
 | `signals.maximumRefundAmount` | number | yes (this service's own schema) | **Sent to Parmana as an extra signal that no current policy reads.** The limits are inside the policy (1.1.0: up to 10000 automatic, up to 100000 with a signed manager approval, above that refused). A lower value here has **no effect**. |
@@ -119,9 +119,10 @@ with no store, so the deployed service (`api/index.ts` on Vercel) uses this in m
 
 Two things still protect against a duplicate Paytm refund across instances: the same `refId` always
 maps to the same Parmana business transaction, so a retry finds Parmana's existing record instead of
-executing again; and Paytm sees one refId per (`orderId`, `txnId`), so it treats a repeat as the same
-refund. The second also means **only one refund per Paytm transaction can go through this path**: a
-second, partial refund of the same `txnId` reuses the same Paytm refId.
+executing again; and Paytm sees one refId per (`orderId`, `txnId`, `refId`), so it treats a repeat as
+the same refund. **Retry a refund with the same `refId`; a new `refId` is a new refund.** Two refunds
+of one `txnId` with different `refId` values reach Paytm as two refunds (G-71); until 2026-09-28 they
+shared one Paytm refId, so only one refund per Paytm transaction could go through this path.
 
 The in memory store's "reconcile before retrying" check holds only within one warm instance. A
 durable `RefundIdempotencyStore` does not exist in this repository today.

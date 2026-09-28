@@ -29,7 +29,8 @@ Parmana /execute
   this service (/connector/paytm-refund): verifies shared secret and signature
         │
         ▼
-  Paytm Refund API       (exactly one call, refId derived by Parmana from orderId and txnId)
+  Paytm Refund API       (exactly one call; refId derived by Parmana from orderId, txnId and
+                          this service's refId, sent as refundReference; reason as the comment)
         │
         ▼
   result recorded as execution evidence in the signed Trust Record,

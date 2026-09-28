@@ -118,6 +118,8 @@ export async function executeAuthorizedConnectorRequest(
   const txnId = requireParameter(parameters, "txnId");
   const refId = requireParameter(parameters, "refId");
   const amount = requireParameter(parameters, "amount");
+  // Optional since G-71 (Parmana): the refund reason, sent to Paytm as the comment.
+  const reason = typeof parameters.reason === "string" && parameters.reason.trim() ? parameters.reason : undefined;
 
   // ADR-0009 Phase 2B: the bearer shared secret above is transport
   // authentication between Parmana and this service -- it proves the
@@ -178,7 +180,7 @@ export async function executeAuthorizedConnectorRequest(
 
   let paytmResult;
   try {
-    paytmResult = await connector.initiateRefund({ orderId, txnId, refId, amount });
+    paytmResult = await connector.initiateRefund({ orderId, txnId, refId, amount, ...(reason !== undefined ? { reason } : {}) });
   } catch (error) {
     await recordAuditEvent({
       type: "execution.rejected",
