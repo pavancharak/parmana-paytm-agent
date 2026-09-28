@@ -70,9 +70,16 @@ components:
       properties:
         orderId: { type: string, minLength: 1 }
         txnId: { type: string, minLength: 1 }
-        refId: { type: string, minLength: 1 }
+        refId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: This refund's own id. Reuse it to retry the same refund; a new refId is a new refund. Sent to Parmana as refundReference, from which the Paytm refId is derived.
         amount: { type: string, pattern: '^[0-9]+(\\.[0-9]{1,2})?$' }
-        reason: { type: string }
+        reason:
+          type: string
+          maxLength: 256
+          description: Sent to Paytm as the refund comment, through Parmana.
         signals:
           $ref: '#/components/schemas/RefundSignals'
         approvalArtifact:
@@ -91,7 +98,7 @@ components:
           required: [success]
           properties:
             success: { type: boolean }
-            refId: { type: string, description: The refId Paytm saw, derived by Parmana from orderId and txnId }
+            refId: { type: string, description: The refId Paytm saw, derived by Parmana from orderId, txnId and the request's refId }
             resultStatus: { type: string }
             resultCode: { type: string }
     DeniedRefund:

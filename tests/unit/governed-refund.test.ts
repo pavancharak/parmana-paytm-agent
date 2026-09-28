@@ -106,6 +106,14 @@ describe("GovernedPaytmRefundService", () => {
     expect((await store.get(base.refId))?.status).toBe("UNKNOWN");
   });
 
+  it("G-71: forwards the refund reason to Parmana", async () => {
+    const authorizer = authorizerReturning(approved);
+
+    await new GovernedPaytmRefundService(authorizer).refund({ ...base, reason: "Arrived damaged" });
+
+    expect(authorizer.authorizeRefund).toHaveBeenCalledWith(expect.objectContaining({ reason: "Arrived damaged" }));
+  });
+
   it("forwards a signed approval to Parmana unchanged", async () => {
     const approvalArtifact = { payload: { approvalId: "a-1" }, signature: { value: "sig" } };
     const authorizer = authorizerReturning(approved);
