@@ -14,6 +14,25 @@ export interface RefundAuthorizationInput {
     fraudCheckPassed: boolean;
     maximumRefundAmount: number;
   };
+  /**
+   * A manager's signed approval, forwarded unchanged. Parmana verifies it
+   * (issuer, signature, expiry, bound to this orderId and amount) and
+   * uses it once; this service never inspects its contents.
+   */
+  approvalArtifact?: Record<string, unknown>;
+}
+
+/**
+ * What Paytm reported for the refund Parmana released, read from the
+ * execution evidence in the signed Trust Record. Parmana releases an
+ * approved refund to its Paytm connector inside POST /execute, so this is
+ * the one and only Paytm call for the refund.
+ */
+export interface RefundExecution {
+  success: boolean;
+  refId?: string;
+  resultStatus?: string;
+  resultCode?: string;
 }
 
 export interface RefundAuthorization {
@@ -22,6 +41,8 @@ export interface RefundAuthorization {
   orderId: string;
   txnId: string;
   amount: string;
+  /** Present when the decision is APPROVED. */
+  execution?: RefundExecution;
   raw: ParmanaExecutionResult;
 }
 
@@ -54,6 +75,7 @@ export class ParmanaRefundAuthorizer {
     const authorizationId = deterministicUuid(`${transactionId}:authorization`);
     const intentId = deterministicUuid(`${transactionId}:intent`);
     const issuedAt = new Date().toISOString();
+    const policy = await this.client.getPolicyInEffect(this.action);
 
     const transaction = {
       businessTransactionId: transactionId,
@@ -97,13 +119,18 @@ export class ParmanaRefundAuthorizer {
         },
         createdAt: issuedAt,
       },
-      policy: { name: "customer-refund", version: "1.0.0", schemaVersion: "1.0.0" },
+      // Never written into this code: Parmana enforces the version most
+      // recently approved, so it is read before every refund.
+      policy: { name: policy.name, version: policy.version, schemaVersion: policy.schemaVersion },
       signals: {
         refundEligible: input.signals.refundEligible,
-        managerApproved: input.signals.managerApproved,
+        // A signed approval is what makes managerApproved true; Parmana
+        // refuses managerApproved true without one it can verify.
+        managerApproved: input.approvalArtifact !== undefined || input.signals.managerApproved,
         fraudCheckPassed: input.signals.fraudCheckPassed,
         refundAmount: Number(amount),
         maximumRefundAmount: input.signals.maximumRefundAmount,
+        ...(input.approvalArtifact !== undefined ? { approvalArtifact: input.approvalArtifact } : {}),
       },
       status: "RECEIVED" as const,
       createdAt: issuedAt,
@@ -138,9 +165,33 @@ export class ParmanaRefundAuthorizer {
       orderId,
       txnId,
       amount,
+      ...(raw.outcome === "APPROVED" ? { execution: readRefundExecution(raw.trustRecord) } : {}),
       raw,
     };
   }
+}
+
+/**
+ * Reads what Paytm reported from the last execution's evidence
+ * ({success, attributes: {refId, resultStatus, resultCode, ...}}, built
+ * by Parmana from its Paytm connector's result). An APPROVED record with
+ * no evidence means the outcome is unknown: this throws so the caller
+ * reconciles, and never falls back to calling Paytm itself.
+ */
+export function readRefundExecution(trustRecord: Record<string, unknown>): RefundExecution {
+  const executions = Array.isArray(trustRecord["executions"]) ? trustRecord["executions"].filter(isRecord) : [];
+  const evidence = executions.at(-1)?.["evidence"];
+
+  if (!isRecord(evidence) || typeof evidence["success"] !== "boolean") {
+    throw new Error("Parmana approved the refund but its Trust Record has no execution evidence; the Paytm outcome is unknown, reconcile before retrying");
+  }
+
+  const attributes = isRecord(evidence["attributes"]) ? evidence["attributes"] : {};
+  const execution: RefundExecution = { success: evidence["success"] };
+  if (typeof attributes["refId"] === "string") execution.refId = attributes["refId"];
+  if (typeof attributes["resultStatus"] === "string") execution.resultStatus = attributes["resultStatus"];
+  if (typeof attributes["resultCode"] === "string") execution.resultCode = attributes["resultCode"];
+  return execution;
 }
 
 /**

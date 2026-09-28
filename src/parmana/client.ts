@@ -46,6 +46,12 @@ export type ParmanaExecutionResult =
       readonly reason: string;
     };
 
+export interface PolicyInEffect {
+  readonly name: string;
+  readonly version: string;
+  readonly schemaVersion: string;
+}
+
 export class ParmanaExecutionAmbiguousError extends Error {
   readonly status: number;
   readonly transactionId: string;
@@ -100,6 +106,33 @@ export class ParmanaHttpClient {
     }
 
     throw new Error(`Parmana API HTTP ${response.status}: ${safeJson(response.body)}`);
+  }
+
+  /**
+   * The policy a request for `capability` must declare right now
+   * (Parmana's GET /policies/in-effect). Parmana enforces the version
+   * most recently approved, so a version written into this code breaks
+   * the moment a new one is approved. Fails closed: anything but a
+   * well formed 200 throws, and no refund is attempted.
+   */
+  async getPolicyInEffect(capability: string): Promise<PolicyInEffect> {
+    const response = await this.request(`/policies/in-effect?capability=${encodeURIComponent(capability)}`, { method: "GET" });
+
+    if (!response.ok) {
+      throw new Error(`Parmana policy in effect lookup for ${capability} failed (HTTP ${response.status}): ${safeJson(response.body)}`);
+    }
+
+    const policy = isRecord(response.body) ? response.body["policy"] : undefined;
+    if (
+      !isRecord(policy) ||
+      typeof policy["name"] !== "string" || !policy["name"] ||
+      typeof policy["version"] !== "string" || !policy["version"] ||
+      typeof policy["schemaVersion"] !== "string" || !policy["schemaVersion"]
+    ) {
+      throw new Error(`Parmana returned a malformed policy in effect for ${capability}: ${safeJson(response.body)}`);
+    }
+
+    return { name: policy["name"], version: policy["version"], schemaVersion: policy["schemaVersion"] };
   }
 
   /**

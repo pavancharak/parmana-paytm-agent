@@ -3,15 +3,15 @@
 This document covers both endpoints this service exposes. They have different trust models and
 should not be conflated:
 
-- `POST /agent/refunds` — an untrusted agent proposes a refund; this service is what calls back into
-  Parmana for real policy authorization before executing anything. See "Authority boundary" below.
+- `POST /agent/refunds`: an untrusted agent proposes a refund; this service asks Parmana, which
+  decides and, when it approves, releases the refund. See "Authority boundary" below.
 - `POST /connector/paytm-refund` — the *opposite* direction: Parmana's own gateway (`GatewayPaytmAdapter`
   in the AgentLabsBuildathon repo) has already authorized a refund internally and calls this endpoint
   to execute it. See "Connector authorization (`/connector/paytm-refund`)" below.
 
 ## Authority boundary (`/agent/refunds`)
 
-The agent is untrusted with respect to financial authority. It can construct a refund proposal but cannot invoke the Paytm connector directly. `GovernedPaytmRefundService` is the execution boundary.
+The agent is untrusted with respect to financial authority. It can construct a refund proposal but cannot invoke the Paytm connector directly. `GovernedPaytmRefundService` has no Paytm client at all: it asks Parmana, and when Parmana approves, Parmana itself releases the refund through `/connector/paytm-refund` below. That is the only path that calls Paytm, so an approved refund is paid once. (Until 2026-09-28 this service also called Paytm itself after an approval, so an approved refund could be paid twice; see `docs/AGENT_REFUNDS_CONTRACT.md`, "History".)
 
 ## Parmana
 
