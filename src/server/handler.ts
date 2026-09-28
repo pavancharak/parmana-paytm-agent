@@ -28,7 +28,9 @@ export const config = loadConfig();
 const parmana = new ParmanaHttpClient({ baseUrl: config.parmanaUrl, apiKey: config.parmanaApiKey, timeoutMs: config.timeoutMs });
 const paytmClient = new PaytmHttpClient({ environment: config.paytmEnvironment, merchantId: config.paytmMerchantId, merchantKey: config.paytmMerchantKey, timeoutMs: config.timeoutMs });
 const paytm = new PaytmRefundConnector(paytmClient);
-const service = new GovernedPaytmRefundService(new ParmanaRefundAuthorizer(parmana, config.parmanaPrincipalId), paytm);
+// No Paytm client here: Parmana releases an approved refund to this
+// service's own /connector/paytm-refund below, which is the one Paytm call.
+const service = new GovernedPaytmRefundService(new ParmanaRefundAuthorizer(parmana, config.parmanaPrincipalId));
 const agent = new RefundAgent(service);
 
 export async function requestHandler(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -39,7 +41,9 @@ export async function requestHandler(request: IncomingMessage, response: ServerR
       if (!authorized(request.headers.authorization, config.agentApiKey)) return sendJson(response, 401, { error: "unauthorized" });
       const body = await readJson(request);
       const result = await agent.proposeRefund(body as Parameters<typeof agent.proposeRefund>[0]);
-      return sendJson(response, result.decision === "DENIED" ? 403 : 200, result);
+      // 403 refused by policy; 502 approved and released, but Paytm did not
+      // report success; 200 approved and Paytm reported success.
+      return sendJson(response, result.decision === "DENIED" ? 403 : result.refund.success ? 200 : 502, result);
     }
 
     if (request.method === "POST" && request.url === "/connector/paytm-refund") {

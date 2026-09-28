@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Parmana Paytm Agent API
   version: 0.1.0
-  description: Agent-facing refund API. Every refund is authorized by Parmana before Paytm execution.
+  description: Agent facing refund API. Every refund is authorized by Parmana, and only Parmana releases it to Paytm.
 servers:
   - url: http://localhost:3000
 paths:
@@ -16,7 +16,7 @@ paths:
     post:
       operationId: proposeRefund
       summary: Propose a customer refund
-      description: The agent proposes the refund. Parmana evaluates the same customer-refund policy; Paytm is called only after approval and exact parameter binding.
+      description: The agent proposes the refund. This service reads the customer-refund version in effect from Parmana and calls Parmana /execute. When Parmana approves it releases the refund to Paytm itself, exactly once; this endpoint never calls Paytm and returns the result from Parmana's Trust Record.
       security:
         - AgentBearerAuth: []
       requestBody:
@@ -27,7 +27,13 @@ paths:
               $ref: '#/components/schemas/RefundProposal'
       responses:
         '200':
-          description: Parmana approved and Paytm was invoked
+          description: Parmana approved and released the refund, and Paytm reported success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovedRefund'
+        '502':
+          description: Parmana approved and released the refund, but Paytm did not report success; reconcile before retrying
           content:
             application/json:
               schema:
@@ -69,15 +75,25 @@ components:
         reason: { type: string }
         signals:
           $ref: '#/components/schemas/RefundSignals'
+        approvalArtifact:
+          type: object
+          description: A manager's signed approval, needed above 10000. Forwarded unchanged to Parmana as signals.approvalArtifact with managerApproved true; Parmana verifies it.
     ApprovedRefund:
       type: object
-      required: [decision, authorizationId, transactionId, paytm]
+      required: [decision, authorizationId, transactionId, refund]
       properties:
         decision: { type: string, enum: [APPROVED] }
         authorizationId: { type: string }
         transactionId: { type: string }
-        paytm:
+        refund:
           type: object
+          description: What Paytm reported, read from the execution evidence in Parmana's signed Trust Record.
+          required: [success]
+          properties:
+            success: { type: boolean }
+            refId: { type: string, description: The refId Paytm saw, derived by Parmana from orderId and txnId }
+            resultStatus: { type: string }
+            resultCode: { type: string }
     DeniedRefund:
       type: object
       required: [decision, authorizationId, transactionId, reason]

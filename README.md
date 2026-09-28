@@ -24,6 +24,8 @@ Parmana Authorization
 
 The connector is not an authorization layer. Paytm side effects are reachable only after a successful Parmana authorization decision, with the authorized transaction parameters bound to the execution request.
 
+**One Paytm call per approved refund.** `/agent/refunds` asks Parmana `POST /execute` (declaring the `customer-refund` version Parmana reports from `GET /policies/in-effect`). On approval Parmana releases the refund inside that call, through its Execution Gateway to this service's `/connector/paytm-refund`, which is the only code that calls Paytm. `/agent/refunds` then returns Paytm's result from Parmana's signed Trust Record. Until 2026-09-28 `/agent/refunds` also called Paytm itself after an approval, so an approved refund could be paid twice. From 2026-09-27 (customer-refund 1.1.0 approved) to this fix it could not happen, because the service declared 1.0.0 and every refund was refused; before that date it could (see `docs/AGENT_REFUNDS_CONTRACT.md`, "History").
+
 ## Why this architecture (out-of-process connector, non-AI gatekeeper)
 
 This service exists as a **separate deployment** from Parmana, rather than Parmana calling Paytm's API in-process the way it calls HubSpot's or GitHub's (see `docs/connectors/PAYTM_CONNECTOR.md` in the AgentLabsBuildathon repo for that comparison). Both this service and Parmana are deliberately **deterministic, non-AI code** on the execution path — an AI agent may *propose* a refund; nothing that decides whether it happens or actually moves money is an LLM.

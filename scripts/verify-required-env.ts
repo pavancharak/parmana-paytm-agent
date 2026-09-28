@@ -33,7 +33,16 @@
  * reachable.
  */
 
+import { requiredEnvCheckApplies } from "./required-env-scope.js";
+
 async function main(): Promise<void> {
+  if (!requiredEnvCheckApplies(process.env.VERCEL_ENV)) {
+    console.log(
+      `verify-required-env: skipped for VERCEL_ENV=${process.env.VERCEL_ENV}; only production builds are checked.`,
+    );
+    return;
+  }
+
   await import("../src/server/handler.js");
 
   console.log(

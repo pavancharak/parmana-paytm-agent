@@ -19,7 +19,7 @@ function transaction(businessTransactionId: string): BusinessTransaction {
     authority: {},
     authorization: {},
     intent: { action: "paytm-refund", target: "order-1", parameters: {} },
-    policy: { name: "customer-refund", version: "1.0.0", schemaVersion: "1.0.0" },
+    policy: { name: "customer-refund", version: "1.1.0", schemaVersion: "1.0.0" },
     signals: {},
     status: "RECEIVED",
     createdAt: new Date().toISOString(),
@@ -119,5 +119,46 @@ describe("ParmanaHttpClient.execute", () => {
     );
 
     await expect(client().execute(transaction(businessTransactionId))).rejects.toThrow(/malformed/);
+  });
+});
+
+describe("ParmanaHttpClient.getPolicyInEffect", () => {
+  it("reads the policy a capability must declare now from GET /policies/in-effect", async () => {
+    const fetchCall = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ capability: "paytm:refund", policy: { name: "customer-refund", version: "1.1.0", schemaVersion: "1.0.0" } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await expect(client().getPolicyInEffect("paytm:refund")).resolves.toEqual({
+      name: "customer-refund",
+      version: "1.1.0",
+      schemaVersion: "1.0.0",
+    });
+    expect(String(fetchCall.mock.calls[0]?.[0])).toBe("https://parmana.example.com/policies/in-effect?capability=paytm%3Arefund");
+  });
+
+  it.each([
+    [409, { error: "no approved version", code: "NO_APPROVED_POLICY_VERSION" }],
+    [503, { error: "lookup failed", code: "POLICY_VERSION_UNAVAILABLE" }],
+    [403, { error: "not allowed", code: "CAPABILITY_NOT_ALLOWED" }],
+  ])("fails closed on HTTP %i, never guessing a version", async (status, body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }),
+    );
+
+    await expect(client().getPolicyInEffect("paytm:refund")).rejects.toThrow(`HTTP ${status}`);
+  });
+
+  it("fails closed on a 200 response without a complete policy", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ capability: "paytm:refund", policy: { name: "customer-refund" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expect(client().getPolicyInEffect("paytm:refund")).rejects.toThrow("malformed policy in effect");
   });
 });

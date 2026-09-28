@@ -5,45 +5,62 @@
 ```text
 Agent
   │
-  │ refund intent + independently obtained signals
+  │ POST /agent/refunds: refund intent, independently obtained signals,
+  │ optional signed manager approval
+  ▼
+this service (/agent/refunds)
+  │  GET  /policies/in-effect?capability=paytm:refund   (policy version, read every time)
+  │  POST /execute
   ▼
 Parmana /execute
-  │
-  ├── policy: customer-refund@1.0.0
+  ├── policy: customer-refund, the version most recently approved (1.1.0 today)
   ├── bound signal: refundAmount == intent.parameters.amount
+  ├── signed manager approval verified when managerApproved is true
   ├── deterministic policy decision
-  └── signed execution evidence
-       │
-       ├── REJECT ───────────────► stop
-       │                            Paytm calls = 0
-       │
-       └── APPROVE
-             │
-             ▼
-       exact-parameter binding
-             │
-             ▼
-       PaytmRefundConnector
-             │
-             ▼
-       Paytm Refund API
+  │
+  ├── REJECT ───────────────► 403 to the agent, Paytm calls = 0
+  │
+  └── APPROVE: released inside the same /execute call
+        │
+        ▼
+  Parmana Execution Gateway (signs the authorization)
+        │
+        ▼
+  this service (/connector/paytm-refund): verifies shared secret and signature
+        │
+        ▼
+  Paytm Refund API       (exactly one call, refId derived by Parmana from orderId and txnId)
+        │
+        ▼
+  result recorded as execution evidence in the signed Trust Record,
+  returned by /execute and passed back to the agent
 ```
 
 ## Security properties
 
-1. The agent never receives a direct Paytm execution primitive.
+1. The agent never receives a Paytm execution primitive. `/agent/refunds` has no Paytm client; the
+   only Paytm call is made by `/connector/paytm-refund` when Parmana releases an approved refund.
 2. Parmana evaluates the refund before any Paytm side effect.
-3. `orderId`, `txnId`, and `amount` are carried through the authorization boundary and must match before execution.
-4. A denied policy decision terminates without a Paytm call.
-5. A parameter mismatch after approval fails closed.
-6. Paytm authentication/checksum is downstream request authentication; it does not replace Parmana authorization.
+3. `orderId`, `txnId`, and `amount` are carried through the authorization boundary; the connector
+   verifies Parmana's signature over them before calling Paytm.
+4. A refused decision ends without a Paytm call.
+5. A parameter mismatch in Parmana's answer is reported and the refId left for reconciliation; it
+   cannot undo a refund Parmana has already released.
+6. Paytm authentication/checksum is downstream request authentication; it does not replace Parmana
+   authorization.
 
 ## Policy
 
-The integration targets the deployed `customer-refund@1.0.0` policy. Its refund amount is bound to `intent.parameters.amount`; the policy approves only when eligibility, manager approval, fraud assessment and the amount threshold are satisfied.
+The service declares the `customer-refund` version Parmana reports as in effect
+(`GET /policies/in-effect`), never a version written into the code. Under 1.1.0: up to 10000 is
+approved automatically after the eligibility and fraud checks, above 10000 up to 100000 needs a
+signed manager approval, above 100000 is refused. The refund amount is bound to
+`intent.parameters.amount`.
 
-The connector must not copy those rules locally. Parmana remains the policy authority.
+The service must not copy those rules locally. Parmana remains the policy authority.
 
 ## Failure handling
 
-A network failure after a refund request may be ambiguous because refund processing can be asynchronous. The system must reconcile the refund using the same merchant reference/status path before considering a retry. It must not blindly generate a new reference and submit a second refund.
+A network failure after a refund request may be ambiguous because refund processing can be
+asynchronous. The system must reconcile the refund using the same merchant reference/status path
+before considering a retry. It must not blindly generate a new reference and submit a second refund.
