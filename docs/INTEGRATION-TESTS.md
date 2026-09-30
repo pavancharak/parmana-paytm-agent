@@ -1,8 +1,8 @@
 # Integration test plan
 
 The connector must be demonstrated with two payloads against the same deployed Parmana policy: the
-`customer-refund` version in effect (`GET /policies/in-effect?capability=paytm:refund`, 1.1.0 at the
-time of writing).
+`customer-refund` version in effect (`GET /policies/in-effect?capability=paytm:refund`, 1.2.0 since
+2026-09-28). Under 1.2.0 every refund needs a signed manager approval, whatever the amount.
 
 ## Scenario A: denied
 
@@ -19,12 +19,12 @@ Example inputs:
 Expected:
 
 1. Parmana evaluates the request.
-2. Decision is `DENIED` (above 10000 needs a signed manager approval).
+2. Decision is `DENIED` (every refund needs a signed manager approval).
 3. `/agent/refunds` returns HTTP 403.
 4. Paytm refund invocation count is exactly **0**.
 5. No Paytm financial side effect occurs.
 
-## Scenario B: approved
+## Scenario B: approved with a signed manager approval
 
 Use the same order/transaction only if the staging merchant account and Paytm refund rules permit
 the test. Otherwise use a separate settled staging transaction.
@@ -33,9 +33,12 @@ Example inputs:
 
 - `amount`: `500.00`
 - `refundEligible`: `true`
-- `managerApproved`: `false`
+- `managerApproved`: `true`
+- `approvalArtifact`: a manager approval signed with `scripts/sign-approval.ts` in the Parmana
+  repository, for this `orderId` and an amount of at least `500.00`, by an approver Parmana trusts
+  (`GET /approval-issuers`)
 - `fraudCheckPassed`: `true`
-- `maximumRefundAmount`: `1000`
+- `maximumRefundAmount`: `100000`
 
 Expected:
 
@@ -47,12 +50,10 @@ Expected:
 5. `/agent/refunds` returns `refund` (from the Trust Record's execution evidence); the Paytm status
    is reconciled before the result is considered final.
 
-## Scenario C: approved with a signed manager approval
+## Scenario C: an approval is used once
 
-As Scenario A, plus `approvalArtifact`: a manager approval signed with
-`scripts/sign-approval.ts` in the Parmana repository, for this `orderId` and an amount of at least
-`50000.00`, by an issuer in Parmana's `TRUSTED_APPROVAL_ISSUERS`. Expected: `APPROVED`, one Paytm
-call. Sending the same approval again is refused (it is used once).
+Send Scenario B's request again with a new `refId` and the same `approvalArtifact`. Expected:
+`DENIED` (the approval was already used), HTTP 403, zero Paytm calls.
 
 ## Evidence
 

@@ -13,7 +13,7 @@ this service (/agent/refunds)
   │  POST /execute
   ▼
 Parmana /execute
-  ├── policy: customer-refund, the version most recently approved (1.1.0 today)
+  ├── policy: customer-refund, the version most recently approved (1.2.0 since 2026-09-28)
   ├── bound signal: refundAmount == intent.parameters.amount
   ├── signed manager approval verified when managerApproved is true
   ├── deterministic policy decision
@@ -53,9 +53,10 @@ Parmana /execute
 ## Policy
 
 The service declares the `customer-refund` version Parmana reports as in effect
-(`GET /policies/in-effect`), never a version written into the code. Under 1.1.0: up to 10000 is
-approved automatically after the eligibility and fraud checks, above 10000 up to 100000 needs a
-signed manager approval, above 100000 is refused. The refund amount is bound to
+(`GET /policies/in-effect`), never a version written into the code. Under 1.2.0 (in effect since
+2026-09-28) every refund above 0 and up to 100000 needs the eligibility and fraud checks **and** a
+signed manager approval for that order covering the amount; anything else is refused. Since
+2026-09-30 Parmana refuses any policy that could approve an action without a signed approval. The refund amount is bound to
 `intent.parameters.amount`.
 
 The service must not copy those rules locally. Parmana remains the policy authority.

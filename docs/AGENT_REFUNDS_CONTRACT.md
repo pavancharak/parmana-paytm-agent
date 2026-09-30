@@ -64,9 +64,9 @@ trail of *which* agent instance proposed a given refund, that isn't provided by 
 | `amount` | **string**, not a number | yes | `"500.00"`, not `500`. Validated as a positive finite number and normalized to two decimals (`normalizeAmount`, `src/governed-refund.ts`); a non positive or non numeric string fails with `500`. |
 | `reason` | string | no | Sent to Parmana as `refundReason`; Parmana passes it to `/connector/paytm-refund` as `reason`, which sends it to Paytm as the refund comment (G-71). At most 256 characters; a blank value is not sent. |
 | `signals.refundEligible` / `fraudCheckPassed` | boolean | yes | Forwarded to Parmana as policy signals. Must come from an independent business system, never inferred from what the customer said. Parmana does not verify them. |
-| `signals.managerApproved` | boolean | yes | Leave `false` unless you send `approvalArtifact`. Under `customer-refund` 1.1.0 Parmana refuses `managerApproved: true` without a signed approval it can verify. |
-| `signals.maximumRefundAmount` | number | yes (this service's own schema) | **Sent to Parmana as an extra signal that no current policy reads.** The limits are inside the policy (1.1.0: up to 10000 automatic, up to 100000 with a signed manager approval, above that refused). A lower value here has **no effect**. |
-| `approvalArtifact` | object | no | A manager's signed approval (made with Parmana's `scripts/sign-approval.ts`), needed above 10000. Forwarded unchanged as `signals.approvalArtifact`, with `managerApproved` sent as `true`. Parmana checks the issuer is trusted, the signature, the expiry, that it names this `orderId` and covers this `amount`, and uses it once. This service does not inspect it beyond requiring an object. |
+| `signals.managerApproved` | boolean | yes | Leave `false` unless you send `approvalArtifact`. Parmana refuses `managerApproved: true` without a signed approval it can verify. |
+| `signals.maximumRefundAmount` | number | yes (this service's own schema) | **Sent to Parmana as an extra signal that no current policy reads.** The limits are inside the policy (`customer-refund` 1.2.0: every refund above 0 and up to 100000 needs a signed manager approval, anything else is refused). A lower value here has **no effect**. |
+| `approvalArtifact` | object | **yes, for every refund to succeed** | A manager's signed approval (made with Parmana's `scripts/sign-approval.ts`, or `signApproval()` / `sign_approval()` in the SDKs). Under `customer-refund` 1.2.0, in effect in production since 2026-09-28, a refund of any amount without one is refused with `403`. Forwarded unchanged as `signals.approvalArtifact`, with `managerApproved` sent as `true`. Parmana checks the issuer is trusted, the signature, the expiry, that it names this `orderId` and covers this `amount`, and uses it once. This service does not inspect it beyond requiring an object. |
 
 ## Responses
 
@@ -143,28 +143,41 @@ curl -i https://<deployment>/agent/refunds \
   }'
 ```
 
-Expect `403`, `{"decision":"DENIED", ...}` (above 10000 with no signed manager approval), and zero
-Paytm calls.
+Expect `403`, `{"decision":"DENIED", ...}` (no signed manager approval; the amount does not matter
+under 1.2.0), and zero Paytm calls.
 
-**Approved** (up to 10000, no manager approval needed):
+**Approved** (any amount above 0 and up to 100000, with a signed manager approval). The manager
+signs, on their own machine, an approval for this `orderId` covering at least this amount:
+
+```bash
+npx tsx scripts/sign-approval.ts \
+  --private-key-file <the manager's private key file> \
+  --approver-id <approver id> --key-id <key id> \
+  --capability paytm:refund --resource-id ORD-STAGING-002 --max-amount 500 \
+  --out approval.json
+```
+
+(run in the Parmana repository), then the caller sends the refund with it:
 
 ```bash
 curl -i https://<deployment>/agent/refunds \
   -H "Authorization: Bearer $AGENT_API_KEY" \
   -H "Content-Type: application/json" \
-  --data-binary '{
-    "orderId": "ORD-STAGING-002",
-    "txnId": "TXN-STAGING-002",
-    "amount": "500.00",
-    "signals": { "refundEligible": true, "managerApproved": false, "fraudCheckPassed": true, "maximumRefundAmount": 1000 }
-  }'
+  --data-binary @- <<EOF
+{
+  "orderId": "ORD-STAGING-002",
+  "txnId": "TXN-STAGING-002",
+  "amount": "500.00",
+  "reason": "Arrived damaged",
+  "signals": { "refundEligible": true, "managerApproved": true, "fraudCheckPassed": true, "maximumRefundAmount": 100000 },
+  "approvalArtifact": $(cat approval.json)
+}
+EOF
 ```
 
 Expect `200`, `{"decision":"APPROVED", "refund": {"success": true, ...}}`, and exactly one Paytm
-call, made by `/connector/paytm-refund` when Parmana releases the refund.
-
-**Above 10000:** add the manager's signed approval as `"approvalArtifact": {...}` (made for this
-`orderId` and an amount at least this refund's).
+call, made by `/connector/paytm-refund` when Parmana releases the refund. An approval works once and
+expires (15 minutes by default): a second request with the same approval is refused.
 
 ## History
 
