@@ -9,6 +9,8 @@ import { verifyPaytmAuthorizationSignature } from "../parmana/authorization.js";
 import { GovernedPaytmRefundService } from "../governed-refund.js";
 import { RefundAgent } from "../agent/refund-agent.js";
 import { recordPaytmAgentAuditEvent } from "../parmana/audit.js";
+import { PaytmRefundReconciler } from "../paytm/reconciliation.js";
+import { executeRefundStatusLookup, parseRefundStatusRequest } from "./refund-status.js";
 
 /**
  * The request handler itself, extracted from a listening http.Server so
@@ -28,6 +30,8 @@ export const config = loadConfig();
 const parmana = new ParmanaHttpClient({ baseUrl: config.parmanaUrl, apiKey: config.parmanaApiKey, timeoutMs: config.timeoutMs });
 const paytmClient = new PaytmHttpClient({ environment: config.paytmEnvironment, merchantId: config.paytmMerchantId, merchantKey: config.paytmMerchantKey, timeoutMs: config.timeoutMs });
 const paytm = new PaytmRefundConnector(paytmClient);
+// Read-only: the status inquiry behind POST /connector/paytm-refund-status.
+const reconciler = new PaytmRefundReconciler(paytm);
 // No Paytm client here: Parmana releases an approved refund to this
 // service's own /connector/paytm-refund below, which is the one Paytm call.
 const service = new GovernedPaytmRefundService(new ParmanaRefundAuthorizer(parmana, config.parmanaPrincipalId));
@@ -51,6 +55,13 @@ export async function requestHandler(request: IncomingMessage, response: ServerR
       const body = await readJson(request);
       const result = await executeAuthorizedConnectorRequest(body, paytm);
       return sendJson(response, 200, result);
+    }
+
+    if (request.method === "POST" && request.url === "/connector/paytm-refund-status") {
+      if (!authorized(request.headers.authorization, config.connectorSharedSecret)) return sendJson(response, 401, { error: "unauthorized" });
+      const lookup = parseRefundStatusRequest(await readJson(request));
+      if (!lookup) return sendJson(response, 400, { error: "orderId and refId are required" });
+      return sendJson(response, 200, await executeRefundStatusLookup(lookup, reconciler));
     }
 
     return sendJson(response, 404, { error: "not_found" });
